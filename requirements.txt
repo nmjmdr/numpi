@@ -1,0 +1,6 @@
+
+pandas
+numpy<2
+psycopg2-binary
+sqlalchemy
+torch
