@@ -170,14 +170,14 @@ class TimeSeriesDataset(Dataset):
 
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=4, hidden_size=50, num_layers=1, dropout=0.1):
+    def __init__(self, input_size=4, hidden_size=100, num_layers=3, dropout=0.15):
         super(LSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
 
         # LSTM layer: batch_first=True so input shape is (batch, seq, features)
         self.lstm = nn.LSTM(
-            input_size, hidden_size, num_layers, batch_first=True, dropout=dropout
+            input_size, hidden_size=100, num_layers=2, batch_first=True, dropout=dropout
         )
         # Fully-connected layer for regression output
         self.fc = nn.Linear(hidden_size, 1)
@@ -309,7 +309,7 @@ def main():
         val_loader,
         num_epochs=100,
         patience=10,
-        learning_rate=0.005,
+        learning_rate=0.003,
         device=device,
     )
 
