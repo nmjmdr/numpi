@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to load a trained LSTM model and analyze a given stock.
+Script to load a trained LSTM model (with embedded metadata) and analyze a given stock.
 Usage: python analyze_stock.py <model_path> <exchange:symbol>
 Example: python analyze_stock.py lstm_model.pth ASX:XYZ
 """
@@ -36,12 +36,9 @@ class LSTMModel(nn.Module):
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        # Initialize hidden and cell states with zeros
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=x.device)
-        # Forward propagate LSTM
         out, _ = self.lstm(x, (h0, c0))
-        # Take the output from the last time step
         out = out[:, -1, :]
         out = self.fc(out)
         return out
@@ -62,7 +59,6 @@ def fetch_stock_data(exchange, symbol):
     """
     with engine.connect() as conn:
         df = pd.read_sql(query, conn)
-    # Ensure date column is in datetime format
     df["date"] = pd.to_datetime(df["date"])
     return df
 
@@ -73,7 +69,7 @@ def preprocess_stock_data(df):
       - Sort by date.
       - Compute log-transformed open, high, low, and close.
       - Compute the previous day's log_close.
-      - Compute the log True Range and ATR over a 252-day rolling window.
+      - Compute the log True Range and ATR based on the atr_period defined in metadata.
     """
     df = df.sort_values("date").reset_index(drop=True)
     df["log_open"] = np.log(df["open"])
@@ -82,7 +78,6 @@ def preprocess_stock_data(df):
     df["log_close"] = np.log(df["close"])
     df["prev_log_close"] = df["log_close"].shift(1)
 
-    # Define the log true range calculation
     def compute_log_true_range(row):
         if pd.isna(row["prev_log_close"]):
             return row["log_high"] - row["log_low"]
@@ -93,39 +88,40 @@ def preprocess_stock_data(df):
         )
 
     df["log_true_range"] = df.apply(compute_log_true_range, axis=1)
-    # ATR over 252 days: simple moving average of log_true_range
-    df["ATR_252"] = df["log_true_range"].rolling(window=252).mean()
     return df
 
 
-def construct_samples(df, window_size=11):
+def compute_atr(df, atr_period):
     """
-    Constructs prediction samples from the preprocessed data.
-    For each valid day (ensuring we have at least window_size days of data
-    and a non-zero ATR for the current day), build an input sample using
-    the 11-day window of features [log_open, log_high, log_low, log_close].
+    Computes the ATR over the specified period from metadata.
+    """
+    df["ATR"] = df["log_true_range"].rolling(window=atr_period).mean()
+    return df
 
+
+def construct_samples(df, window_size):
+    """
+    Constructs prediction samples from the preprocessed data using the window size from metadata.
     Returns:
       - dates: list of dates corresponding to each sample (the last day in the window)
-      - inputs_arr: numpy array of shape (num_samples, window_size, 4)
+      - inputs_arr: numpy array of shape (num_samples, window_size, num_features)
       - log_close_values: numpy array of the current day's log_close for each sample.
     """
     dates = []
     inputs = []
     log_close_values = []
 
-    # The starting index must allow for both the window and the ATR computation.
-    start_idx = max(window_size - 1, 251)
+    start_idx = max(window_size - 1, df["ATR"].first_valid_index() or 0)
+
     for i in range(start_idx, len(df)):
         window_data = df.iloc[i - window_size + 1 : i + 1]
         if len(window_data) < window_size:
             continue
-        # Ensure ATR is available and non-zero for the current day
-        atr_value = df.iloc[i]["ATR_252"]
+
+        atr_value = df.iloc[i]["ATR"]
         if pd.isna(atr_value) or atr_value == 0:
             continue
 
-        # Construct the input sample from the 11-day window (4 features per day)
         sample = window_data[
             ["log_open", "log_high", "log_low", "log_close"]
         ].values.astype(np.float32)
@@ -135,7 +131,8 @@ def construct_samples(df, window_size=11):
 
     if len(inputs) == 0:
         return None, None, None
-    inputs_arr = np.array(inputs)  # shape: (num_samples, window_size, 4)
+
+    inputs_arr = np.array(inputs)
     return dates, inputs_arr, np.array(log_close_values)
 
 
@@ -185,105 +182,76 @@ def main():
         )
         return
 
-    # Fetch and preprocess data for the stock
     print(f"Fetching data for {exchange}:{symbol}...")
     df = fetch_stock_data(exchange, symbol)
     if df.empty:
         print("No data found for the specified stock.")
         return
-    print("Preprocessing data...")
-    df_processed = preprocess_stock_data(df)
 
-    # Construct samples (using a window_size of 11 days)
-    window_size = 11
-    print("Constructing samples...")
-    dates, X_samples, log_close_values = construct_samples(
-        df_processed, window_size=window_size
-    )
-    if dates is None:
-        print(
-            "Not enough data to construct samples. Check the dataset and ATR computation."
-        )
+    print("Preprocessing data...")
+    df = preprocess_stock_data(df)
+
+    print(f"Loading model from {args.model_path}...")
+    model_package = torch.load(args.model_path, map_location="cpu")
+
+    if isinstance(model_package, dict) and "metadata" in model_package:
+        state_dict = model_package["state_dict"]
+        metadata = model_package["metadata"]
+    else:
+        print("Error: Model file does not contain metadata.")
         return
 
-    # Load the trained neural net model
-    device = torch.device("cpu")
+    window_size = metadata.get("input_window_size", 11)
+    atr_period = metadata.get("atr_period", 252)
+
+    df = compute_atr(df, atr_period)
+
+    print("Constructing samples...")
+    dates, X_samples, log_close_values = construct_samples(df, window_size)
+    if dates is None:
+        print("Not enough data to construct samples.")
+        return
+
     model = LSTMModel(input_size=4, hidden_size=100, num_layers=3, dropout=0.15)
-    print(f"Loading model from {args.model_path}...")
-    model.load_state_dict(torch.load(args.model_path, map_location=device))
-    model.to(device)
+    model.load_state_dict(state_dict)
+    model.to("cpu")
     model.eval()
 
-    # Compute neural net outputs for each sample
     nn_outputs = []
     with torch.no_grad():
         for sample in X_samples:
-            sample_tensor = torch.tensor(sample).unsqueeze(0).to(device)  # (1, 11, 4)
+            sample_tensor = torch.tensor(sample).unsqueeze(0).to("cpu")
             output = model(sample_tensor)
             nn_outputs.append(output.item())
+
     nn_outputs = np.array(nn_outputs)
 
-    # Compute the entropy of the NN output distribution
     nn_entropy = compute_entropy(nn_outputs, bins=20)
-    # Compute the IQR ratio: (IQR of NN outputs) / (IQR of log_close values)
     iqr_ratio = compute_iqr_ratio(nn_outputs)
 
     print(f"Neural Net Output Entropy: {nn_entropy:.4f}")
     print(f"IQR Ratio (NN outputs / log_close): {iqr_ratio:.4f}")
 
-    # -----------------------------
-    # Plotting: Create subplots with shared x-axis
-    # -----------------------------
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.05,
+        vertical_spacing=0.1,
         subplot_titles=("Log Close Prices", "Neural Net Output"),
     )
 
-    # Subplot 1: Log Close Prices
     fig.add_trace(
         go.Scatter(x=dates, y=log_close_values, mode="lines", name="Log Close Prices"),
         row=1,
         col=1,
     )
-
-    # Subplot 2: Neural Net Outputs
     fig.add_trace(
         go.Scatter(x=dates, y=nn_outputs, mode="lines", name="Neural Net Output"),
         row=2,
         col=1,
     )
 
-    # Compute the overall x-axis range from the data
-    min_date = min(dates)
-    max_date = max(dates)
-
-    # Update x-axis for both subplots so that they share the same range.
-    fig.update_xaxes(range=[min_date, max_date], row=1, col=1, showticklabels=True)
-    fig.update_xaxes(
-        range=[min_date, max_date],
-        row=2,
-        col=1,
-        showticklabels=True,
-        rangeslider=dict(visible=True),
-    )
-
-    # Ensure both x-axes match (this forces them to use the same tick settings)
-    fig.update_xaxes(matches="x", row=1, col=1)
-    fig.update_xaxes(matches="x", row=2, col=1)
-
-    # Update layout with common titles and labels
-    fig.update_layout(
-        title=f"{exchange}:{symbol} Analysis<br>Entropy: {nn_entropy:.4f}, IQR Ratio: {iqr_ratio:.4f}",
-        xaxis_title="Date",
-        yaxis_title="Log Close Prices",
-        yaxis2_title="NN Output",
-        hovermode="x unified",
-    )
-
-    # Display the interactive plot
+    fig.update_layout(title=f"{exchange}:{symbol} Analysis", hovermode="x unified")
     fig.show()
 
 
