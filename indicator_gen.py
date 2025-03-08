@@ -162,7 +162,7 @@ class TimeSeriesDataset(Dataset):
 
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=4, hidden_size=100, num_layers=2, dropout=0.15):
+    def __init__(self, input_size=4, hidden_size=100, num_layers=3, dropout=0.20):
         super(LSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -191,7 +191,7 @@ def train_model(
     val_loader,
     num_epochs=100,
     patience=10,
-    learning_rate=0.003,
+    learning_rate=0.002,
     device="cpu",
 ):
     criterion = nn.MSELoss()
@@ -263,7 +263,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=0)
     input_size = 4
     model = LSTMModel(
-        input_size=input_size, hidden_size=100, num_layers=2, dropout=0.15
+        input_size=input_size, hidden_size=100, num_layers=3, dropout=0.15
     )
     model.to(device)
     print("Training the model...")
@@ -272,7 +272,7 @@ def main():
         train_loader,
         val_loader,
         num_epochs=100,
-        patience=10,
+        patience=15,
         learning_rate=0.003,
         device=device,
     )
