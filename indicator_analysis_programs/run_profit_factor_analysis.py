@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 This program prepares the data required by the neural net,
-loads the trained LSTM model from a .pth file,
+loads the trained LSTM model (with embedded metadata) from a .pth file,
 computes the neural net outputs (r_series) for each test day,
 and then uses the profit_factor_module to find the optimal thresholds and profit factors.
-It then builds an interactive graph using Plotly:
-  - The top subplot shows the price (close) series with markers at long and short entries/exits.
-  - The bottom subplot shows the r_series with horizontal lines for l_theta and s_theta.
+It then builds an interactive Plotly graph:
+  - The top subplot shows the close price series with markers at long and short entries/exits.
+  - The bottom subplot shows the neural net outputs (r_series) with horizontal lines for l_theta and s_theta.
 The graph is scrollable and zoomable.
 The program accepts a stock parameter (--stock) in the format <exchange>:<symbol> to analyze a specific stock.
 """
@@ -74,18 +74,18 @@ def preprocess_stock_data(df):
     return df
 
 
-def construct_test_samples(df, test_start_date, test_end_date, window_size=11):
+def construct_test_samples(df, test_start_date, test_end_date, window_size):
     """
     For each day between test_start_date and test_end_date, constructs an input sample
-    consisting of an 11-day window of features [log_open, log_high, log_low, log_close].
+    consisting of an 11-day window of features (as defined in metadata).
 
     Returns:
       - test_dates: List of dates corresponding to each sample (the last day in the window).
       - samples: NumPy array of shape (num_samples, window_size, 4).
-      - close_series: List of close prices for the test dates (for profit factor computation).
+      - close_series: List of close prices for the test dates.
     """
     df = df.sort_values("date").reset_index(drop=True)
-    # Ensure enough data: start 300 days before test_start_date to cover ATR and window.
+    # Ensure enough data: start 300 days before test_start_date.
     min_date = pd.to_datetime(test_start_date) - pd.Timedelta(days=300)
     df_test = df[df["date"] >= min_date].reset_index(drop=True)
 
@@ -138,46 +138,37 @@ class LSTMModel(nn.Module):
 
 
 def generate_trade_markers(
-    r_series, dates, close_series, l_theta, s_theta, is_positive_corr=False
+    r_series, dates, close_series, l_theta, s_theta, is_positive_corr
 ):
     """
-    Generate trade entry and exit markers based on the r_series and the thresholds.
+    Generate trade entry and exit markers.
     For is_positive_corr False:
-      - Long trade entry when r_value <= l_theta, exit when r_value > l_theta.
-      - Short trade entry when r_value >= s_theta, exit when r_value < s_theta.
-
-    Returns:
-      - long_entries, long_exits, short_entries, short_exits
-        Each is a list of tuples: (date, close_price).
+      - Long entry when r_value <= l_theta, exit when r_value > l_theta.
+      - Short entry when r_value >= s_theta, exit when r_value < s_theta.
+    Returns lists of (date, price) for long entries, long exits, short entries, and short exits.
     """
     long_entries = []
     long_exits = []
     short_entries = []
     short_exits = []
-
     long_open = False
     short_open = False
     for i in range(len(r_series)):
         r_val = r_series[i]
         date = dates[i]
         price = close_series[i]
-
-        # For long positions (for is_positive_corr False, entry if r <= l_theta)
         if not long_open and (r_val <= l_theta):
             long_entries.append((date, price))
             long_open = True
         if long_open and (r_val > l_theta):
             long_exits.append((date, price))
             long_open = False
-
-        # For short positions (for is_positive_corr False, entry if r >= s_theta)
         if not short_open and (r_val >= s_theta):
             short_entries.append((date, price))
             short_open = True
         if short_open and (r_val < s_theta):
             short_exits.append((date, price))
             short_open = False
-
     return long_entries, long_exits, short_entries, short_exits
 
 
@@ -233,9 +224,29 @@ def main():
     print("Preprocessing data...")
     df_processed = preprocess_stock_data(df)
 
+    # Load the model package (state_dict + metadata)
+    device = torch.device("cpu")
+    print(f"Loading model from {args.model_path}...")
+    model_package = torch.load(args.model_path, map_location=device)
+    if isinstance(model_package, dict) and "metadata" in model_package:
+        state_dict = model_package["state_dict"]
+        metadata = model_package["metadata"]
+    else:
+        state_dict = model_package
+        metadata = {
+            "input_window_size": 11,
+            "atr_period": 252,
+            "feature_columns": ["log_open", "log_high", "log_low", "log_close"],
+            "is_positive_corr": False,
+        }
+
+    # Use metadata to set parameters.
+    window_size = metadata.get("input_window_size", 11)
+    is_positive_corr = metadata.get("is_positive_corr", False)
+
     print("Constructing test samples...")
     test_dates, test_samples, close_series = construct_test_samples(
-        df_processed, args.test_start_date, args.test_end_date
+        df_processed, args.test_start_date, args.test_end_date, window_size
     )
     if len(test_samples) == 0:
         print(
@@ -243,30 +254,23 @@ def main():
         )
         return
 
-    device = torch.device("cpu")
     model = LSTMModel(input_size=4, hidden_size=100, num_layers=3, dropout=0.15)
-    print(f"Loading model from {args.model_path}...")
-    model.load_state_dict(torch.load(args.model_path, map_location=device))
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
 
-    # Compute neural net outputs (r_series) for each test sample.
+    # Compute neural net outputs (r_series)
     r_series = []
     with torch.no_grad():
         for sample in test_samples:
-            sample_tensor = (
-                torch.tensor(sample).unsqueeze(0).to(device)
-            )  # shape: (1, window_size, 4)
+            sample_tensor = torch.tensor(sample).unsqueeze(0).to(device)
             output = model(sample_tensor)
             r_series.append(output.item())
     r_series = np.array(r_series)
 
-    # Prepare x_series as a DataFrame with 'date' and 'close' columns.
+    # Prepare x_series for profit factor module.
     x_series = pd.DataFrame({"date": test_dates, "close": close_series})
-
-    # Define candidate bins and set is_positive_corr to False (as specified).
     bins = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99]
-    is_positive_corr = False
 
     print("Computing optimal thresholds and profit factors...")
     l_theta, long_pf, s_theta, short_pf = find_optimal_thresholds(
@@ -277,15 +281,10 @@ def main():
     print(f"Long Position (l_theta): {l_theta}, Profit Factor: {long_pf}")
     print(f"Short Position (s_theta): {s_theta}, Profit Factor: {short_pf}")
 
-    # Generate trade markers for plotting.
     long_entries, long_exits, short_entries, short_exits = generate_trade_markers(
         r_series, test_dates, close_series, l_theta, s_theta, is_positive_corr
     )
 
-    # -----------------------------
-    # Build the interactive Plotly graph.
-    # -----------------------------
-    # Increase vertical_spacing to provide more space between the two subplots.
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -297,14 +296,11 @@ def main():
         ),
     )
 
-    # Top subplot: Close Price Series.
     fig.add_trace(
         go.Scatter(x=test_dates, y=close_series, mode="lines", name="Close Price"),
         row=1,
         col=1,
     )
-
-    # Markers for long entries and exits.
     if long_entries:
         le_dates, le_prices = zip(*long_entries)
         fig.add_trace(
@@ -335,8 +331,6 @@ def main():
             row=1,
             col=1,
         )
-
-    # Markers for short entries and exits.
     if short_entries:
         se_dates, se_prices = zip(*short_entries)
         fig.add_trace(
@@ -367,8 +361,6 @@ def main():
             row=1,
             col=1,
         )
-
-    # Bottom subplot: r_series.
     fig.add_trace(
         go.Scatter(
             x=test_dates,
@@ -380,8 +372,6 @@ def main():
         row=2,
         col=1,
     )
-
-    # Add horizontal lines for l_theta and s_theta in the r_series plot.
     fig.add_hline(
         y=l_theta,
         line_dash="dash",
@@ -399,19 +389,15 @@ def main():
         col=1,
     )
 
-    # Update layout for interactivity.
     fig.update_layout(
         title=f"{exchange}:{symbol} Analysis<br>Long PF: {long_pf:.2f}, Short PF: {short_pf:.2f}",
         xaxis=dict(rangeslider=dict(visible=True), type="date"),
         hovermode="x unified",
         margin=dict(t=50, b=50),
     )
-
     fig.update_xaxes(title_text="Date", row=2, col=1)
     fig.update_yaxes(title_text="Close Price", row=1, col=1)
     fig.update_yaxes(title_text="r_series", row=2, col=1)
-
-    # Show the figure.
     fig.show()
 
 
