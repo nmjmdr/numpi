@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Script to load a trained LSTM model and analyze a given stock.
 Usage: python analyze_stock.py <model_path> <exchange:symbol>
@@ -159,11 +160,10 @@ def compute_iqr_ratio(data):
     where IQR is the difference between the 75th and 25th percentiles.
     """
     q75, q25 = np.percentile(data, [75, 25])
-
-    max = data.max()
-    min = data.min()
-
-    return (max - min) / (q75 - q25)
+    iqr = q75 - q25
+    if iqr == 0:
+        return float("nan")
+    return (data.max() - data.min()) / iqr
 
 
 # -----------------------------
@@ -229,7 +229,7 @@ def main():
     iqr_ratio = compute_iqr_ratio(nn_outputs)
 
     print(f"Neural Net Output Entropy: {nn_entropy:.4f}")
-    print(f"IQR Ratio: {iqr_ratio:.4f}")
+    print(f"IQR Ratio (NN outputs / log_close): {iqr_ratio:.4f}")
 
     # -----------------------------
     # Plotting: Create subplots with shared x-axis
@@ -256,17 +256,32 @@ def main():
         col=1,
     )
 
-    # Update layout with a common x-axis range slider
+    # Compute the overall x-axis range from the data
+    min_date = min(dates)
+    max_date = max(dates)
+
+    # Update x-axis for both subplots so that they share the same range.
+    fig.update_xaxes(range=[min_date, max_date], row=1, col=1, showticklabels=True)
+    fig.update_xaxes(
+        range=[min_date, max_date],
+        row=2,
+        col=1,
+        showticklabels=True,
+        rangeslider=dict(visible=True),
+    )
+
+    # Ensure both x-axes match (this forces them to use the same tick settings)
+    fig.update_xaxes(matches="x", row=1, col=1)
+    fig.update_xaxes(matches="x", row=2, col=1)
+
+    # Update layout with common titles and labels
     fig.update_layout(
         title=f"{exchange}:{symbol} Analysis<br>Entropy: {nn_entropy:.4f}, IQR Ratio: {iqr_ratio:.4f}",
-        xaxis2_title="Date",
-        yaxis1_title="Log Close Prices",
+        xaxis_title="Date",
+        yaxis_title="Log Close Prices",
         yaxis2_title="NN Output",
         hovermode="x unified",
     )
-
-    # Enable the range slider on the bottom x-axis
-    fig.update_xaxes(rangeslider_visible=True, row=2, col=1)
 
     # Display the interactive plot
     fig.show()
