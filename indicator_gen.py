@@ -289,8 +289,20 @@ def main():
     avg_val_loss = np.mean(val_losses)
     print(f"Final Validation Loss: {avg_val_loss:.6f}")
     model_save_path = "lstm_model.pth"
-    torch.save(model.state_dict(), model_save_path)
-    print(f"Model saved to {model_save_path}")
+
+    # Embed metadata with the model. This metadata dictionary follows a common format.
+    metadata = {
+        "input_window_size": 11,
+        "atr_period": 252,
+        "feature_columns": ["log_open", "log_high", "log_low", "log_close"],
+        "target_calculation": "(current_log_close - average(log_close of previous 10 days)) / ATR_252",
+        "model_type": "LSTMModel",
+        "training_date": datetime.now().isoformat(),
+    }
+    # Save a package with both the state_dict and metadata.
+    model_package = {"state_dict": model.state_dict(), "metadata": metadata}
+    torch.save(model_package, model_save_path)
+    print(f"Model saved to {model_save_path} with embedded metadata.")
 
 
 if __name__ == "__main__":
