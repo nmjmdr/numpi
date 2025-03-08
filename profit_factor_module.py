@@ -55,18 +55,17 @@ def simulate_trades(r_series, close_series, threshold, is_positive_corr, trade_t
                 if trade_type == "long":
                     if not long_condition(r_series[j], threshold, is_positive_corr):
                         break
+                    # For long trades, use normal log return.
+                    daily_return = np.log(close_series[j] / close_series[j - 1])
                 else:  # short trade
                     if not short_condition(r_series[j], threshold, is_positive_corr):
                         break
-                # Calculate daily log return (ensure valid close prices)
-                if close_series[j - 1] <= 0 or close_series[j] <= 0:
-                    j += 1
-                    continue
-                daily_return = np.log(close_series[j] / close_series[j - 1])
+                    # For short trades, invert the log return.
+                    daily_return = -np.log(close_series[j] / close_series[j - 1])
                 trade_returns.append(daily_return)
                 j += 1
             trades.append(trade_returns)
-            i = j  # Jump to day after trade exit
+            i = j  # Jump to the day after trade exit
         else:
             i += 1
 
@@ -94,8 +93,7 @@ def find_optimal_thresholds(r_series, x_series, bins, is_positive_corr, min_num_
 
     Parameters:
       r_series: NumPy array of indicator values (e.g., neural net outputs) for each day.
-      x_series: DataFrame or dict-like object containing at least a 'close' column
-                corresponding to r_series.
+      x_series: DataFrame or dict-like object containing at least a 'close' column corresponding to r_series.
       bins: List of candidate threshold values.
       is_positive_corr: Boolean flag (for our case, typically False).
       min_num_trades: Minimum number of trades required for a candidate threshold to be valid.
