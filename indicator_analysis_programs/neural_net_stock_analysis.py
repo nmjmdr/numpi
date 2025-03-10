@@ -14,6 +14,7 @@ from sqlalchemy import create_engine
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
+import os
 
 # -----------------------------
 # Database Configuration
@@ -225,6 +226,23 @@ def main():
             nn_outputs.append(output.item())
 
     nn_outputs = np.array(nn_outputs)
+    print(f"{nn_outputs}")
+
+    data = {
+        "Date": dates,
+        "Neural_Net_Output": nn_outputs,
+        "Log_Close": log_close_values,
+    }
+
+    df_output = pd.DataFrame(data)
+
+    # Save to CSV
+    output_filename = f"{exchange}_{symbol}_analysis.csv"
+    output_path = os.path.join(os.getcwd(), output_filename)
+
+    df_output.to_csv(output_path, index=False)
+
+    print(f"Results saved to {output_path}")
 
     nn_entropy = compute_entropy(nn_outputs, bins=20)
     iqr_ratio = compute_iqr_ratio(nn_outputs)
